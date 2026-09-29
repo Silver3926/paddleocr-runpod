@@ -78,9 +78,19 @@ Break-even                      = ~100 sesi/bulan
 
 Pasang Network Volume hanya kalau kamu butuh menyimpan PDF dan hasil
 antar-sesi. Saat itu cache model bisa ikut ke volume tanpa biaya tambahan —
-SSH. Kalau perlu `scp`/`rsync` untuk file besar, daftarkan SSH public key di
-Settings Runpod lebih dulu (tanpa itu env `PUBLIC_KEY` berisi `null` dan SSH
-tidak bisa dipakai).
+mount ke `/workspace`, karena path cache sudah menunjuk ke sana.
+
+## Memindahkan file masuk dan keluar
+
+Ada dua jalur:
+
+- **JupyterLab** (port 8888) — file browser, cukup untuk PDF berukuran sedang.
+- **SSH + `scp`/`rsync`** — lebih baik untuk file besar. Daftarkan SSH public
+  key di Settings Runpod lebih dulu. Tanpa itu env `PUBLIC_KEY` berisi `null`,
+  SSH tidak bisa dipakai, dan kamu hanya punya Web Terminal.
+
+Kalau PDF-nya sudah ada di URL publik, cara tercepat cukup `wget` di Web
+Terminal — tidak perlu JupyterLab sama sekali.
 
 ## Menjalankan OCR di dalam pod
 
