@@ -3,6 +3,11 @@ name: Build image -> GHCR
 on:
   push:
     branches: [main]
+    # Jangan rebuild image 15 menit hanya karena README berubah.
+    paths:
+      - 'Dockerfile'
+      - 'run_ocr.py'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 jobs:
@@ -16,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # Runner GitHub default hanya punya ~14GB kosong di /, sedangkan
-      # image ini (Paddle + model) bisa 8-10GB saat di-build.
+      # image ini (Paddle + deps) bisa 8-10GB saat di-build.
       # Tanpa langkah ini, build sering mati dengan "no space left on device".
       - name: Bebaskan ruang disk
         run: |
