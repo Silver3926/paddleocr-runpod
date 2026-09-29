@@ -15,8 +15,7 @@ Pada OmniDocBench v1.5 (benchmark yang sama, jadi bisa dibandingkan langsung):
 | Text Edit (makin kecil makin baik) | 0,073 | **0,035** |
 
 Selisih terbesar ada di tabel dan formula — persis yang dibutuhkan buku
-kuliah hasil scan. PaddleOCR-VL-1.6 sendiri mencapai 96,33% pada
-OmniDocBench v1.6.
+kuliah hasil scan.
 
 Dua hal yang dimiliki PaddleOCR-VL dan tidak dimiliki PP-StructureV3:
 
@@ -25,13 +24,13 @@ Dua hal yang dimiliki PaddleOCR-VL dan tidak dimiliki PP-StructureV3:
    dan menyusun ulang hierarki heading bab/sub-bab.
 2. **Pemrosesan PDF secara batch** — `use_queues=True` menjalankan render
    halaman, layout analysis, dan inferensi VLM secara asinkron. Loop per
-   halaman (cara lama) justru mematikan pipelining ini.
+   halaman justru mematikan pipelining ini.
 
 ## Isi
 
 | File | Fungsi |
 |---|---|
-| `Dockerfile` | PaddlePaddle GPU 3.2.1 cu126 + `paddleocr[doc-parser]` + font |
+| `Dockerfile` | PaddlePaddle GPU 3.2.1 cu126 + `paddleocr[doc-parser]` + jupyterlab + font |
 | `run_ocr.py` | OCR per bagian dengan checkpoint, output Markdown + JSON |
 | `.github/workflows/build.yml` | Build & push ke GHCR saat `main` berubah |
 
@@ -41,6 +40,30 @@ Dua hal yang dimiliki PaddleOCR-VL dan tidak dimiliki PP-StructureV3:
 GitHub Actions tidak punya GPU maupun driver, sehingga `import paddle` selalu
 gagal di CI. Karena `PaddleOCRVL` juga meng-import paddle, **warm-up model tidak
 mungkin dijalankan saat build**. Model diunduh saat boot pertama pod.
+
+## JupyterLab: kenapa sempat gagal
+
+`/start.sh` milik Runpod menyalakan JupyterLab lewat:
+
+```bash
+nohup python3 -m jupyter lab ... &> /jupyter.log &
+```
+
+Di base image ini `python3` adalah **3.10.12** (tempat Paddle dipasang),
+sementara entrypoint `jupyter` menunjuk ke **Python 3.12**. Jadi
+`python3 -m jupyter` gagal seketika — tapi `/start.sh` tetap mencetak
+`Jupyter Lab started` 0,3 ms kemudian, dan pesan errornya dibuang ke
+`/jupyter.log` sehingga tidak terlihat di log container.
+
+Perbaikannya: `jupyterlab` dipasang ke interpreter yang sama dengan `python3`.
+Efek sampingnya menguntungkan — notebook ikut berjalan di 3.10, sehingga
+`import paddle` di dalam notebook juga bekerja.
+
+Ada juga penjaga di build: `RUN python3 -m jupyter --version`, yang langsung
+menggagalkan build kalau suatu saat pemasangan ini lepas lagi.
+
+> Kalau proxy menampilkan *"Waiting for service to respond"*, periksa
+> `/jupyter.log` — di situlah pesan sebenarnya berada.
 
 ## Network Volume TIDAK diperlukan
 
@@ -55,21 +78,9 @@ Break-even                      = ~100 sesi/bulan
 
 Pasang Network Volume hanya kalau kamu butuh menyimpan PDF dan hasil
 antar-sesi. Saat itu cache model bisa ikut ke volume tanpa biaya tambahan —
-mount ke `/workspace`, karena path cache sudah menunjuk ke sana.
-
-## Cara pakai
-
-1. Push ke `main` otomatis membangun image ke:
-   `ghcr.io/silver3926/paddleocr-runpod:latest`
-2. Paket GHCR sudah public (repo ini public), jadi Runpod bisa menariknya
-   tanpa kredensial.
-3. Buat pod dari template **PaddleOCR PP-StructureV3 - Buku Scan**
-   (nama template belum diperbarui), container disk 20 GB.
-4. Boot pertama: biarkan model terunduh. Cek GPU terdeteksi:
-
-```bash
-python3 -c "import paddle; print(paddle.__version__); paddle.utils.run_check()"
-```
+SSH. Kalau perlu `scp`/`rsync` untuk file besar, daftarkan SSH public key di
+Settings Runpod lebih dulu (tanpa itu env `PUBLIC_KEY` berisi `null` dan SSH
+tidak bisa dipakai).
 
 ## Menjalankan OCR di dalam pod
 
@@ -79,7 +90,7 @@ tmux new -s ocr
 # cek seberapa tajam scan-nya (penting untuk formula)
 pdfimages -list /workspace/data/buku.pdf | head -30
 
-# kalibrasi 20 halaman tersulit dulu
+# kalibrasi 20 halaman tersulit dulu — sekaligus ukur kecepatan
 python3 /opt/paddleocr/run_ocr.py 100 119
 
 # lanjut kalau kualitas sudah oke
@@ -98,15 +109,14 @@ menjadi `/workspace/out/buku-kuliah/buku-lengkap.md`.
   bahwa inferensi lokal tanpa server vLLM ditujukan untuk validasi cepat, dan
   kecepatannya belum tentu memadai untuk produksi. Ukur dulu pada 20 halaman.
   Kalau terlalu lambat, langkah berikutnya adalah menjalankan server vLLM
-  (backend `vllm-server`) — image server-nya sekitar 13 GB dan berjalan sebagai
-  proses kedua di pod yang sama.
+  (backend `vllm-server`) sebagai proses kedua di pod yang sama.
 - `CHUNK_PAGES` (default 50) menentukan ukuran bagian. Penggabungan tabel dan
   heading hanya berlaku di dalam satu bagian. Set `CHUNK_PAGES=0` untuk
-  memproses seluruh PDF sekaligus (penggabungan penuh, tapi tanpa checkpoint).
+  memproses seluruh PDF sekaligus (penggabungan penuh, tanpa checkpoint).
 - `PADDLE_PDX_CACHE_HOME` default `/workspace/.paddlex`.
 - `SRC_PDF`, `OUT_DIR`, dan `CHUNK_PAGES` bisa dioverride lewat env var.
-- `paddlepaddle-gpu` di pin ke `3.2.1` (cu126) karena PaddleOCR-VL mensyaratkan
-  >= 3.2.1. Driver host perlu >= 550.54.14.
+- `paddlepaddle-gpu` di pin ke `3.2.1` (cu126). Driver host perlu >= 550.54.14.
+  Terbukti jalan di host CUDA 13.2.
 - Progres disimpan di `checkpoint.json` per bagian.
 - Ukuran komponen terukur: base ~0,75 GB, apt termasuk font beberapa ratus MB,
   `paddlepaddle-gpu` + `nvidia-*` ~3,93 GB. Total image sekitar 7-8 GB.
