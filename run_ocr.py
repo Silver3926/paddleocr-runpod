@@ -9,6 +9,10 @@ Env var:
     SRC_PDF   path PDF     (default /workspace/data/buku.pdf)
     OUT_DIR   folder hasil (default /workspace/out/buku-kuliah)
 
+Catatan: pemanggilan PERTAMA akan mengunduh model PP-StructureV3
+(beberapa menit). Model disimpan di PADDLE_PDX_CACHE_HOME, jadi
+kalau Network Volume ter-mount, unduhan itu hanya sekali.
+
 Aman dihentikan kapan saja: progres dicatat per halaman di
 checkpoint.json, jadi menjalankan ulang hanya memproses halaman
 yang belum selesai.
@@ -27,6 +31,10 @@ OUT = Path(os.environ.get("OUT_DIR", "/workspace/out/buku-kuliah"))
 CKPT = OUT / "checkpoint.json"
 OUT.mkdir(parents=True, exist_ok=True)
 
+cache = os.environ.get("PADDLE_PDX_CACHE_HOME", "(default)")
+print(f"Model cache : {cache}", flush=True)
+print("Menyiapkan pipeline (unduhan model pertama kali bisa beberapa menit)...", flush=True)
+
 # use_doc_unwarping sangat penting untuk buku scan: menghilangkan
 # distorsi lengkung di area punggung buku.
 # use_chart_recognition dimatikan: model VLM, berat, jarang diperlukan.
@@ -39,6 +47,7 @@ pipeline = PPStructureV3(
     use_seal_recognition=False,
     engine="paddle",  # wajib "paddle"; engine transformers tidak dukung formula
 )
+print("Pipeline siap.\n", flush=True)
 
 done = json.loads(CKPT.read_text()) if CKPT.exists() else {}
 doc = fitz.open(SRC)

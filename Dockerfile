@@ -5,8 +5,13 @@
 #  runpod/base tetap punya start script Runpod, sehingga flag
 #  startJupyter / startSsh di template berfungsi.
 #
-#  PaddlePaddle GPU wheel bersifat self-contained: cukup driver
-#  host yang cocok, tidak perlu install CUDA toolkit terpisah.
+#  CATATAN PENTING soal model:
+#  Model TIDAK di-bake ke image, dan itu bukan pilihan gaya.
+#  libpaddle.so ter-link ke libcuda.so.1 (library driver NVIDIA).
+#  Runner GitHub Actions tidak punya GPU maupun driver, jadi
+#  `import paddle` selalu gagal di CI. Karena itu warm-up model
+#  tidak mungkin dilakukan di sini; model diunduh saat boot
+#  pertama pod, ke Network Volume supaya persisten.
 # ============================================================
 FROM runpod/base:1.0.2-ubuntu2204
 
@@ -21,33 +26,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # PaddlePaddle GPU — cu126 (butuh driver host >= 550.54.14)
+# Wheel ini self-contained: 1,85 GB wheel + ~2 GB paket nvidia-*.
 RUN python3 -m pip install --no-cache-dir --upgrade pip && \
     python3 -m pip install --no-cache-dir paddlepaddle-gpu==3.2.0 \
       -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
 
-# Gagalkan build lebih awal kalau wheel ternyata bukan versi GPU.
-# paddle.version.cuda() tidak butuh GPU fisik, jadi bisa jalan di runner CI.
-RUN python3 -c "import paddle; c = paddle.version.cuda(); \
-    assert c, 'FATAL: wheel yang terinstall bukan GPU build'; \
-    print('OK - Paddle CUDA build:', c)"
+# Verifikasi dependensi CUDA TANPA meng-import paddle.
+# `import paddle` tidak mungkin di CI (lihat catatan di atas),
+# jadi kita periksa paketnya lewat metadata saja.
+RUN python3 -c "import importlib.metadata as m; \
+    v = m.version('nvidia-cuda-runtime-cu12'); \
+    assert v.startswith('12.6'), f'versi CUDA tidak sesuai: {v}'; \
+    m.version('nvidia-cudnn-cu12'); \
+    print('OK - dependensi CUDA runtime terpasang:', v)"
 
 # PaddleOCR + dukungan PP-StructureV3 (layout, tabel, formula)
 RUN python3 -m pip install --no-cache-dir "paddleocr[doc-parser]" pymupdf
 
-# ------------------------------------------------------------------
-#  Bake model ke dalam image.
-#  Tujuannya bukan kecepatan, tapi PORTABILITAS: kapasitas GPU Runpod
-#  sedang ketat dan Network Volume terikat region. Dengan model di
-#  dalam image, pod bisa jalan di region mana pun tanpa unduhan.
-#  Kalau ingin image lebih kecil, hapus blok RUN di bawah.
-# ------------------------------------------------------------------
-ENV PADDLE_PDX_CACHE_HOME=/opt/paddlex
+# Model diunduh saat boot pertama ke Network Volume (persisten),
+# sehingga sesi berikutnya tidak mengunduh ulang.
+# Kalau volume tidak ter-mount, /workspace ada di container disk dan
+# model akan hilang saat pod di-stop (sekadar mengunduh ulang).
+ENV PADDLE_PDX_CACHE_HOME=/workspace/.paddlex
 ENV PADDLE_PDX_MODEL_SOURCE=huggingface
-
-RUN python3 -c "\
-from paddleocr import PPStructureV3; \
-PPStructureV3(use_chart_recognition=False, use_seal_recognition=False)" \
-    || echo 'WARN: warm-up dilewati - model akan diunduh saat boot pertama'
 
 COPY run_ocr.py /opt/paddleocr/run_ocr.py
 
