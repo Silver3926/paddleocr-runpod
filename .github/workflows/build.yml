@@ -1,0 +1,52 @@
+name: Build image -> GHCR
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Runner GitHub default hanya punya ~14GB kosong di /, sedangkan
+      # image ini (Paddle + model) bisa 8-10GB saat di-build.
+      # Tanpa langkah ini, build sering mati dengan "no space left on device".
+      - name: Bebaskan ruang disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+                      "$AGENT_TOOLSDIRECTORY" || true
+          sudo docker image prune -af || true
+          df -h /
+
+      # GHCR menolak nama paket yang mengandung huruf besar.
+      - name: Nama image (paksa huruf kecil)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Login ke GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          # attestation provenance bikin GHCR kadang menolak; matikan saja
+          provenance: false
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
