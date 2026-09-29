@@ -41,6 +41,10 @@ GitHub Actions tidak punya GPU maupun driver, sehingga `import paddle` selalu
 gagal di CI. Karena `PaddleOCRVL` juga meng-import paddle, **warm-up model tidak
 mungkin dijalankan saat build**. Model diunduh saat boot pertama pod.
 
+Catatan terukur: unduhan model **1,93 GB dalam 33 detik** (83 MB/s) dari
+jaringan datacenter Runpod. Ini alasan kuat untuk tidak menyewa Network Volume
+hanya demi cache model.
+
 ## JupyterLab: kenapa sempat gagal
 
 `/start.sh` milik Runpod menyalakan JupyterLab lewat:
@@ -67,13 +71,13 @@ menggagalkan build kalau suatu saat pemasangan ini lepas lagi.
 
 ## Network Volume TIDAK diperlukan
 
-Cache model PaddleOCR-VL sekitar **2,2 GB** (PP-DocLayoutV3 + preprocessor +
+Cache model PaddleOCR-VL sekitar **1,93 GB** (PP-DocLayoutV3 + preprocessor +
 model VLM 0.9B). Tidak ada UniMERNet (1,5 GB) maupun SLANeXt (351 MB x2).
 
 ```
 Network volume (minimum 10 GB)  = $0.70/bulan, dibayar terus
-Unduh ulang model tiap sesi     = ~1-2 menit, ~$0.006/sesi
-Break-even                      = ~100 sesi/bulan
+Unduh ulang model tiap sesi     = 33 detik, ~$0.003/sesi
+Break-even                      = ~230 sesi/bulan
 ```
 
 Pasang Network Volume hanya kalau kamu butuh menyimpan PDF dan hasil
@@ -89,10 +93,18 @@ Ada dua jalur:
   key di Settings Runpod lebih dulu. Tanpa itu env `PUBLIC_KEY` berisi `null`,
   SSH tidak bisa dipakai, dan kamu hanya punya Web Terminal.
 
-Kalau PDF-nya sudah ada di URL publik, cara tercepat cukup `wget` di Web
-Terminal — tidak perlu JupyterLab sama sekali.
+Di Windows, `scp` hanya otomatis memakai key bernama default (`id_rsa`,
+`id_ed25519`). Kalau namanya lain, tunjuk eksplisit dengan `-i`:
+
+```powershell
+scp -i $env:USERPROFILE\.ssh\NAMA_KEY -P <port> "C:\path\buku.pdf" root@<ip>:/workspace/data/
+```
 
 ## Menjalankan OCR di dalam pod
+
+`--pdf` **wajib** dan tidak punya nilai default. Seluruh argumen divalidasi
+sebelum pipeline dimuat, jadi path yang salah gagal seketika — bukan setelah
+1,9 GB model terunduh.
 
 ```bash
 tmux new -s ocr
@@ -100,18 +112,28 @@ tmux new -s ocr
 # cek seberapa tajam scan-nya (penting untuk formula)
 pdfimages -list /workspace/data/buku.pdf | head -30
 
-# kalibrasi 20 halaman tersulit dulu — sekaligus ukur kecepatan
-python3 /opt/paddleocr/run_ocr.py 100 119
+# kalibrasi 20 halaman tersulit — sekaligus ukur kecepatan
+python3 /opt/paddleocr/run_ocr.py --pdf /workspace/data/buku.pdf --pages 100 119
 
 # lanjut kalau kualitas sudah oke
-python3 /opt/paddleocr/run_ocr.py 1 45
+python3 /opt/paddleocr/run_ocr.py --pdf /workspace/data/buku.pdf --pages 1 45
+
+# seluruh buku sekaligus (penggabungan penuh, tanpa checkpoint)
+python3 /opt/paddleocr/run_ocr.py --pdf /workspace/data/buku.pdf --chunk 0
 ```
 
-Hasil per bagian ada di `/workspace/out/buku-kuliah/bagian-xxxx-yyyy/` sebagai
-`.md` dan `.json`. Setelah semua bagian selesai, script otomatis menggabungkannya
-menjadi `/workspace/out/buku-kuliah/buku-lengkap.md`.
+Hasil per bagian ada di `<nama-pdf>-ocr/bagian-xxxx-yyyy/` sebagai `.md` dan
+`.json`. Setelah semua bagian selesai, script otomatis menggabungkannya menjadi
+`<nama-pdf>-lengkap.md`. Tiap bagian dicetak bersama laju `s/halaman`.
 
 **Unduh hasilnya sebelum terminate pod** — container disk hilang saat pod berhenti.
+
+### Memperbarui script tanpa build ulang
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Silver3926/paddleocr-runpod/main/run_ocr.py \
+  -o /opt/paddleocr/run_ocr.py
+```
 
 ## Catatan penting
 
@@ -120,11 +142,10 @@ menjadi `/workspace/out/buku-kuliah/buku-lengkap.md`.
   kecepatannya belum tentu memadai untuk produksi. Ukur dulu pada 20 halaman.
   Kalau terlalu lambat, langkah berikutnya adalah menjalankan server vLLM
   (backend `vllm-server`) sebagai proses kedua di pod yang sama.
-- `CHUNK_PAGES` (default 50) menentukan ukuran bagian. Penggabungan tabel dan
-  heading hanya berlaku di dalam satu bagian. Set `CHUNK_PAGES=0` untuk
+- `--chunk` (default 50) menentukan ukuran bagian. Penggabungan tabel dan
+  heading hanya berlaku di dalam satu bagian. Pakai `--chunk 0` untuk
   memproses seluruh PDF sekaligus (penggabungan penuh, tanpa checkpoint).
 - `PADDLE_PDX_CACHE_HOME` default `/workspace/.paddlex`.
-- `SRC_PDF`, `OUT_DIR`, dan `CHUNK_PAGES` bisa dioverride lewat env var.
 - `paddlepaddle-gpu` di pin ke `3.2.1` (cu126). Driver host perlu >= 550.54.14.
   Terbukti jalan di host CUDA 13.2.
 - Progres disimpan di `checkpoint.json` per bagian.
