@@ -131,6 +131,7 @@ def main():
 
     for cs, ce in ranges:
         key = f"{cs}-{ce}"
+        n = ce - cs + 1
         if key in done:
             print(f"  [{key}] sudah selesai, dilewati", flush=True)
             continue
@@ -145,8 +146,27 @@ def main():
         sub.save(sub_path)
         sub.close()
 
+        print(f"  [{key}] mulai, {n} halaman...", flush=True)
         t0 = time.time()
-        pages = list(pipeline.predict(str(sub_path)))
+
+        # predict_iter() mengembalikan generator, jadi progres bisa dicetak
+        # per halaman. predict() mengembalikan list yang baru tersedia
+        # setelah SELURUH bagian selesai — layar akan diam selama itu.
+        if hasattr(pipeline, "predict_iter"):
+            stream = pipeline.predict_iter(str(sub_path))
+        else:  # jaring pengaman kalau nama API-nya berbeda di versi lain
+            stream = pipeline.predict(str(sub_path))
+
+        pages = []
+        for i, res in enumerate(stream, 1):
+            pages.append(res)
+            el = time.time() - t0
+            print(
+                f"      {i}/{n}  {el:6.0f}s  (~{el / i:4.1f}s/hal,"
+                f" sisa ~{(el / i) * (n - i) / 60:4.1f} mnt)",
+                flush=True,
+            )
+
         merged = list(
             pipeline.restructure_pages(
                 pages,
@@ -166,8 +186,11 @@ def main():
         ckpt.write_text(json.dumps(done))
         sub_path.unlink(missing_ok=True)
 
-        n = ce - cs + 1
-        print(f"  [{key}] {done[key]:.0f}s  ({done[key] / n:.1f}s/halaman)", flush=True)
+        print(
+            f"  [{key}] selesai {done[key]:.0f}s  ({done[key] / n:.1f}s/halaman)"
+            f"  -> {bagian}",
+            flush=True,
+        )
 
     # Gabungkan semua bagian jadi satu dokumen kalau semuanya sudah selesai.
     if all(f"{cs}-{ce}" in done for cs, ce in ranges):
