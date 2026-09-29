@@ -3,22 +3,22 @@
 OCR PDF buku scan -> Markdown, memakai PaddleOCR-VL-1.6.
 
 Contoh pemakaian:
-    python3 /opt/paddleocr/run_ocr.py --pdf /workspace/data/buku.pdf
-    python3 /opt/paddleocr/run_ocr.py --pdf buku.pdf --pages 100 119
-    python3 /opt/paddleocr/run_ocr.py --pdf buku.pdf --pages 1 500 --chunk 25
-    python3 /opt/paddleocr/run_ocr.py --pdf buku.pdf --chunk 0
+    # inferensi lokal (VLM berjalan di proses ini)
+    python3 /opt/paddleocr/run_ocr.py --pdf /workspace/data/buku.pdf --pages 1 20
 
---pdf WAJIB dan tidak punya nilai default. Sebelumnya script ini
-mengasumsikan /workspace/data/buku.pdf, sehingga salah nama berkas baru
-ketahuan setelah model 1,9 GB terlanjur dimuat. Sekarang seluruh argumen
-divalidasi lebih dulu, sebelum pipeline disentuh sama sekali.
+    # VLM dilayani server vLLM terpisah (dianjurkan)
+    python3 /opt/paddleocr/run_ocr.py --pdf buku.pdf --pages 1 20 \\
+        --vl-rec-backend vllm-server --vl-rec-server-url http://127.0.0.1:8118/v1
+
+--pdf WAJIB dan tidak punya nilai default. Seluruh argumen divalidasi
+sebelum pipeline dimuat, jadi path yang salah gagal seketika — bukan
+setelah 1,9 GB model terlanjur diunduh.
 
 Kenapa dipecah per bagian (--chunk)?
   - Ada checkpoint: crash di bagian 8 tidak mengulang bagian 1-7.
   - Tapi penggabungan tabel antar-halaman (merge_tables) dan penyusunan
     ulang heading (relevel_titles) hanya berlaku DI DALAM satu bagian.
-    Pakai --chunk 0 kalau mau penggabungan seluruh buku dan tidak
-    keberatan kehilangan checkpoint.
+    Pakai --chunk 0 kalau mau penggabungan seluruh buku tanpa checkpoint.
 """
 import argparse
 import json
@@ -37,29 +37,33 @@ def parse_args(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument(
-        "--pdf",
-        required=True,
-        metavar="PATH",
+        "--pdf", required=True, metavar="PATH",
         help="berkas PDF yang diproses (WAJIB, tidak ada default)",
     )
     ap.add_argument(
-        "--pages",
-        nargs=2,
-        type=int,
-        metavar=("START", "END"),
+        "--pages", nargs=2, type=int, metavar=("START", "END"),
         help="rentang halaman, 1-indexed dan inklusif (default: semua halaman)",
     )
     ap.add_argument(
-        "--chunk",
-        type=int,
-        default=50,
-        metavar="N",
+        "--chunk", type=int, default=50, metavar="N",
         help="halaman per bagian (default: 50). 0 = seluruh PDF sekali jalan",
     )
     ap.add_argument(
-        "--out",
-        metavar="DIR",
+        "--out", metavar="DIR",
         help="folder hasil (default: <nama-pdf>-ocr di sebelah PDF-nya)",
+    )
+    ap.add_argument(
+        "--vl-rec-backend", default=None, metavar="NAMA",
+        help="backend VLM: vllm-server | sglang-server | fastdeploy-server. "
+             "Kosong = inferensi lokal",
+    )
+    ap.add_argument(
+        "--vl-rec-server-url", default=None, metavar="URL",
+        help="URL server VLM, mis. http://127.0.0.1:8118/v1",
+    )
+    ap.add_argument(
+        "--no-queues", action="store_true",
+        help="matikan use_queues (jalur paralel). Pakai kalau pipeline menggantung",
     )
     return ap.parse_args(argv)
 
@@ -69,9 +73,6 @@ def main():
 
     # ------------------------------------------------------------------
     #  Validasi masukan SEBELUM memuat pipeline.
-    #  Membuat pipeline mengunduh ~1,9 GB model pada pemanggilan pertama.
-    #  Kalau path-nya salah, kita ingin tahu dalam sekejap, bukan setelah
-    #  menunggu unduhan itu selesai.
     # ------------------------------------------------------------------
     src = Path(args.pdf).expanduser().resolve()
     if not src.exists():
@@ -112,18 +113,27 @@ def main():
     print(f"Rentang : {start}-{end}  -> {len(ranges)} bagian")
     print(f"Output  : {out}")
     print(f"Cache   : {os.environ.get('PADDLE_PDX_CACHE_HOME', '(default)')}")
+    print(f"VLM     : {args.vl_rec_backend or 'lokal'}"
+          + (f" @ {args.vl_rec_server_url}" if args.vl_rec_server_url else ""))
     print("\nMenyiapkan pipeline (unduhan model pertama kali beberapa menit)...", flush=True)
 
     # use_doc_unwarping penting untuk buku scan: menghilangkan distorsi
-    # lengkung di area punggung buku. PaddleOCR-VL tidak punya modul formula
-    # terpisah — teks, tabel, dan formula ditangani model VLM yang sama.
-    pipeline = PaddleOCRVL(
+    # lengkung di area punggung buku.
+    kwargs = dict(
         pipeline_version="v1.6",
         use_doc_orientation_classify=True,
         use_doc_unwarping=True,
         use_chart_recognition=False,
         use_seal_recognition=False,
     )
+    if args.vl_rec_backend:
+        kwargs["vl_rec_backend"] = args.vl_rec_backend
+    if args.vl_rec_server_url:
+        kwargs["vl_rec_server_url"] = args.vl_rec_server_url
+    if args.no_queues:
+        kwargs["use_queues"] = False
+
+    pipeline = PaddleOCRVL(**kwargs)
     print("Pipeline siap.\n", flush=True)
 
     done = json.loads(ckpt.read_text()) if ckpt.exists() else {}
@@ -136,10 +146,6 @@ def main():
             print(f"  [{key}] sudah selesai, dilewati", flush=True)
             continue
 
-        # Potong PDF jadi satu bagian. Pipeline memproses PDF secara batch
-        # dengan use_queues=True, sehingga render halaman, layout analysis,
-        # dan inferensi VLM berjalan asinkron — jauh lebih efisien daripada
-        # memanggil predict() satu halaman demi satu halaman.
         sub = fitz.open()
         sub.insert_pdf(doc, from_page=cs - 1, to_page=ce - 1)
         sub_path = tmp / f"chunk-{cs:04d}-{ce:04d}.pdf"
@@ -149,12 +155,12 @@ def main():
         print(f"  [{key}] mulai, {n} halaman...", flush=True)
         t0 = time.time()
 
-        # predict_iter() mengembalikan generator, jadi progres bisa dicetak
-        # per halaman. predict() mengembalikan list yang baru tersedia
-        # setelah SELURUH bagian selesai — layar akan diam selama itu.
+        # predict_iter() mengembalikan generator sehingga progres bisa
+        # dicetak per halaman. predict() mengembalikan list yang baru
+        # tersedia setelah SELURUH bagian selesai.
         if hasattr(pipeline, "predict_iter"):
             stream = pipeline.predict_iter(str(sub_path))
-        else:  # jaring pengaman kalau nama API-nya berbeda di versi lain
+        else:
             stream = pipeline.predict(str(sub_path))
 
         pages = []
@@ -170,8 +176,8 @@ def main():
         merged = list(
             pipeline.restructure_pages(
                 pages,
-                merge_tables=True,       # gabungkan tabel yang terpotong antar halaman
-                relevel_titles=True,     # susun ulang hierarki heading multi-level
+                merge_tables=True,       # gabungkan tabel antar halaman
+                relevel_titles=True,     # susun ulang heading multi-level
                 concatenate_pages=True,  # jadikan satu dokumen
             )
         )
@@ -192,7 +198,6 @@ def main():
             flush=True,
         )
 
-    # Gabungkan semua bagian jadi satu dokumen kalau semuanya sudah selesai.
     if all(f"{cs}-{ce}" in done for cs, ce in ranges):
         parts = []
         for cs, ce in ranges:
